@@ -1,0 +1,288 @@
+                                                                     #include <stdio.h>
+#include <memory.h>
+#include <string.h>
+#include <glib.h>
+#include <glib-object.h>
+#include <curl/curl.h>
+
+#include "defs.h"
+#include "httpcli.h"
+#include "ccs.h"
+#include "plat.h"
+#include "floor.h"
+#include "ui.h"
+#include "utils.h"
+#include "logging.h"
+#include "properties.h"
+#include "pw_meter.h"
+
+struct t_ctrl ctrl;
+static HANDLE _current_thd = NULL;
+
+static int check_singleton(int chk) {
+    if (chk) {
+        HANDLE h = CreateMutex(NULL, TRUE, "CCSSVC");
+        if (NULL == h) return 0;
+        if (ERROR_ALREADY_EXISTS == GetLastError()) return 0;
+    } else {
+        HANDLE h = CreateMutex(NULL, TRUE, "CCSSVC");
+        if (h) {
+            CloseHandle(h);
+        }
+    }
+    return 1;
+}
+
+#if defined(_CCS_VALIDATE_ENABLED)
+static int validate_date(void)
+{
+    HKEY hkey = NULL;
+    int days_to_expire = -1;
+    for(;;) {
+        SYSTEMTIME now;
+        DWORD bufferSize = 16;
+        BYTE d1[16], d1decy[16], d2decy[16], d2[16], nowm[16];
+        ULARGE_INTEGER unow, du1, du2;
+
+        if (ERROR_SUCCESS != RegOpenKey(HKEY_CURRENT_USER, "Software\\Brogent\\CCS", &hkey)) break;
+        if (ERROR_SUCCESS != RegQueryValueEx(hkey, "D1", NULL, NULL, d1, &bufferSize)) break;
+        bufferSize = 16;
+        if (ERROR_SUCCESS != RegQueryValueEx(hkey, "D2", NULL, NULL, d2, &bufferSize)) break;
+        if (!DecryptData(d1, 16, d1decy, 16)) break;
+        if (!DecryptData(d2, 16, d2decy, 16)) break;
+        TransformST2UI((SYSTEMTIME*)(d1decy), &du1);
+        TransformST2UI((SYSTEMTIME*)(d2decy), &du2);
+
+        GetLocalTime(&now);
+        TransformST2UI(&now, &unow);
+
+        if (unow.QuadPart < du1.QuadPart) break;
+        if (unow.QuadPart > du2.QuadPart) break;
+
+        if (!EncryptData((unsigned char*)(&now), 16, d1decy, 16)) break;
+        memcpy(nowm, d1decy, sizeof(BYTE)*16);
+        if (ERROR_SUCCESS != RegSetValueEx(hkey, "D1", 0, REG_BINARY, nowm, 16)) break;
+
+        // caculate how many days will expire
+        days_to_expire = (int)((LONGLONG)(du2.QuadPart - unow.QuadPart) / 864000000000) + 1; // 864000000000 is 24HR
+
+        break;
+    }
+    if (hkey != NULL) RegCloseKey(hkey);
+    return days_to_expire;
+}
+#endif
+
+static int file_is_out_of_date(FILETIME *target, FILETIME *baseline) {
+    LARGE_INTEGER b, t;
+    b.HighPart = baseline->dwHighDateTime;
+    b.LowPart = baseline->dwLowDateTime;
+    t.HighPart = target->dwHighDateTime;
+    t.LowPart = target->dwLowDateTime;
+
+    // 46B8E92D8000 is 90 days
+    return ( (b.QuadPart - t.QuadPart) > (LONGLONG)(0x46B8E92D8000) );
+}
+
+static void ptr_array_destroy_notify(gpointer data) {
+    GString *s = (GString*)data;
+    if (s) g_string_free(s, TRUE);
+}
+
+static void delete_log_file(gpointer data, gpointer user_data) {
+    char filename[MAX_PATH] = {0};
+    GString *s = (GString*)data;
+    (void*)user_data;
+    sprintf(filename, "log/%s", s->str);
+    DeleteFile(filename);
+}
+
+
+static void clear_out_of_date_log(const char *pattern) {
+    SYSTEMTIME ct = {0};
+    FILETIME bt = {0};
+    WIN32_FIND_DATA fd = {0};
+    HANDLE found = INVALID_HANDLE_VALUE;
+    //const char *pattern = "log/log-*.db";
+
+
+    GPtrArray *list = g_ptr_array_new_with_free_func(ptr_array_destroy_notify);
+    if (list == 0) return;
+
+    for(;;) {
+        GetSystemTime( &ct );
+        if ( 0 == SystemTimeToFileTime( &ct, &bt ) ) break;
+
+        found = FindFirstFile( pattern, &fd );
+        if ( found == INVALID_HANDLE_VALUE ) break;
+
+        if ( file_is_out_of_date( &(fd.ftLastWriteTime), &bt ) )
+        {
+            GString *fn = g_string_new(fd.cFileName);
+            g_ptr_array_add(list, fn);
+        }
+
+        while ( FindNextFile( found, &fd ) != 0 )
+        {
+            if ( file_is_out_of_date( &(fd.ftLastWriteTime), &bt ) )
+            {
+                GString *fn = g_string_new(fd.cFileName);
+                g_ptr_array_add(list, fn);
+            }
+        }
+
+        FindClose( found );
+
+        g_ptr_array_foreach(list, delete_log_file, 0);
+        break;
+    }
+
+	g_ptr_array_free(list, TRUE);
+}
+
+static BOOL CtrlHandler(DWORD fdwCtrlType) {
+  switch(fdwCtrlType)
+  {
+    case CTRL_C_EVENT:
+      Beep(750, 300);
+      ui_quit();
+      WaitForSingleObject(GetCurrentThread(), 50000);
+      return TRUE;
+
+    case CTRL_CLOSE_EVENT:
+      Beep(600, 200);
+      ui_quit();
+      WaitForSingleObject(GetCurrentThread(), 50000);
+      return TRUE;
+
+     case CTRL_BREAK_EVENT:
+      Beep(900, 200);
+      ui_quit();
+      WaitForSingleObject(GetCurrentThread(), 50000);
+      return TRUE;
+
+    case CTRL_LOGOFF_EVENT:
+      Beep(1000, 200);
+      ui_quit();
+      WaitForSingleObject(GetCurrentThread(), 50000);
+      return TRUE;
+
+    case CTRL_SHUTDOWN_EVENT:
+      Beep(750, 500);
+      ui_quit();
+      WaitForSingleObject(GetCurrentThread(), 50000);
+      return TRUE;
+
+    default:
+      return FALSE;
+  }
+}
+
+int main(int argc, char **argv) {
+    int i, day_to_expire = 100;
+    const char *config_file = "ccs.ini";
+
+    _current_thd = GetCurrentThread();
+
+    if (argc > 1) {
+        config_file = argv[1];
+    }
+
+    if (!check_singleton(1)) {
+        printf("Can not run ccs server twice\nPress any key to exit.....\n");
+        getchar();
+        return -1;
+    }
+
+    SetConsoleCtrlHandler((PHANDLER_ROUTINE) CtrlHandler, TRUE);
+#if defined _SHOW_CONSOLE | defined DEBUG | defined _DEBUG
+    ShowConsole(1);
+#else
+    ShowConsole(0);
+#endif    
+
+    if (!g_thread_supported())
+        g_thread_init(NULL);
+    
+    init_time(0);
+    init_httpcmd();
+
+    logging_init();
+
+    // delete outdated log file
+    clear_out_of_date_log("log/log-*.db");
+    clear_out_of_date_log("log/log-*.db-shm");
+    clear_out_of_date_log("log/log-*.db-wal");
+
+    LOG_INFO(0, "PROG-START:");
+
+#if defined(_CCS_VALIDATE_ENABLED)
+    day_to_expire = validate_date();
+    if (day_to_expire <= 0) {
+        LOG_ERROR(0, "PROG-START-FAILED: Software outdated.");
+    }
+#endif
+
+    properties_init();
+
+    if (properties_add_source(properties_type_ini, config_file) == 0) {
+        LOG_INFO(0, "Load %s", config_file);
+    }
+
+    //pw_meter_get();
+
+    if (NULL == (ctrl.ccs = ccs_new(day_to_expire))) {
+        LOG_FATAL(0, "PROG-START-FAILED: Can not create ccs object.");        
+        properties_destroy();
+        logging_destroy();
+        uninit_httpcmd();
+        return -1;
+    }
+
+    // MPC
+    for (i=0; i<PLAT_NUM; ++i) {
+        // todo: read config file
+        ctrl.plats[i] = plat_new(i);
+    }
+
+    for (i=0; i<FLOOR_NUM; ++i) {
+        int j=0;
+        ctrl.floors[i] = floor_new(i);
+        for (j=0; j<PLAT_NUM; ++j) {
+            if (i == (int)plat_get_fidx(ctrl.plats[j])) {
+                floor_add_platform(ctrl.floors[i]);
+            }
+        }
+    }
+
+    LOG_DEBUG(0, "--> ccs_start()");
+    ccs_start(ctrl.ccs);
+    LOG_DEBUG(0, "<-- ccs_start()");
+
+    ui_main();
+
+    ccs_stop(ctrl.ccs);
+
+    for (i = 0; i< PLAT_NUM; ++i) {
+        plat_destroy(ctrl.plats[i]);
+    }
+
+    ccs_del(ctrl.ccs);
+
+    //pw_meter_release();
+
+    properties_destroy();
+
+    LOG_INFO(0, "PROG-END:");    
+
+    logging_destroy();
+
+    uninit_httpcmd();    
+
+    check_singleton(0);
+
+    FreeConsole();
+
+    return 0;
+}
+
