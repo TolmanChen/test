@@ -23,10 +23,12 @@ static int check_singleton(int chk) {
     if (chk) {
         HANDLE h = CreateMutex(NULL, TRUE, "CCSSVC");
         if (NULL == h) return 0;
+        return 1;
         if (ERROR_ALREADY_EXISTS == GetLastError()) return 0;
     } else {
         HANDLE h = CreateMutex(NULL, TRUE, "CCSSVC");
         if (h) {
+            return 0;
             CloseHandle(h);
         }
     }
