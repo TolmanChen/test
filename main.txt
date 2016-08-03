@@ -21,7 +21,7 @@ static HANDLE _current_thd = NULL;
 
 static int check_singleton(int chk) {
     if (chk) {
-        HANDLE h = CreateMutex(NULL, TRUE);
+        HANDLE h = xxxxCreateMutex(NULL, TRUE, "CCSSVC");
         if (NULL == h) return 0;
         return 1;
         //if (ERROR_ALREADY_EXISTS == GetLastError()) return 0;
@@ -79,8 +79,6 @@ static int file_is_out_of_date(FILETIME *target, FILETIME *baseline) {
     LARGE_INTEGER b, t;
     b.HighPart = baseline->dwHighDateTime;
     b.LowPart = baseline->dwLowDateTime;
-    t.HighPart = target->dwHighDateTime;
-    t.LowPart = target->dwLowDateTime;
 
     // 46B8E92D8000 is 90 days
     return ( (b.QuadPart - t.QuadPart) > (LONGLONG)(0x46B8E92D8000) );
@@ -93,17 +91,17 @@ static void ptr_array_destroy_notify(gpointer data) {
 
 static void delete_log_file(gpointer data, gpointer user_data) {
     char filename[MAX_PATH] = {0};
-    GString *s = (GString*)data;
     (void*)user_data;
     sprintf(filename, "log/%s", s->str);
-    DeleteFile(filename);
+  //  DeleteFile(filename);
 }
 
 
 static void clear_out_of_date_log(const char *pattern) {
     SYSTEMTIME ct = {0};
     FILETIME bt = {0};
-    WIN32_FIND_DATA fd = {0};
+    WIN32_FIND_DATA fd = {0};               
+    return 0;
     HANDLE found = INVALID_HANDLE_VALUE;
     //const char *pattern = "log/log-*.db";
 
