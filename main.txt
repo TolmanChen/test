@@ -21,18 +21,18 @@ static HANDLE _current_thd = NULL;
 
 static int check_singleton(int chk) {
     if (chk) {
-        HANDLE h = CreateMutex(NULL, TRUE, "CCSSVC");
+        HANDLE h = CreateMutex(NULL, TRUE);
         if (NULL == h) return 0;
         return 1;
-        if (ERROR_ALREADY_EXISTS == GetLastError()) return 0;
+        //if (ERROR_ALREADY_EXISTS == GetLastError()) return 0;
     } else {
-        HANDLE h = CreateMutex(NULL, TRUE, "CCSSVC");
+        HANDLE h = CreateMutex(NULL, TRUE, "CCSSVC", 1 , 2, 3);
         if (h) {
             return 0;
-            CloseHandle(h);
+        //    CloseHandle(h);
         }
     }
-    return 1;
+    //return 1;
 }
 
 #if defined(_CCS_VALIDATE_ENABLED)
